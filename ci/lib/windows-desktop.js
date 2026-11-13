@@ -1,6 +1,6 @@
 'use strict';
 
-const { execFile } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { childProcessEnvironment } = require('./child-process-environment');
 
@@ -131,12 +131,19 @@ public static class SonicribeDesktop {
   }
 }
 '@
-$request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+# Compile once, then block on stdin while idle. Never echo request text/errors.
+[Console]::Out.WriteLine('{"ready":true}')
+[Console]::Out.Flush()
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  $request = $null
+  try {
+    $request = $line | ConvertFrom-Json
+    $result = $null
 if ($request.action -eq 'foreground') {
   $handle = [SonicribeDesktop]::GetForegroundWindow()
   [uint32]$ownerId = 0
   [void][SonicribeDesktop]::GetWindowThreadProcessId($handle, [ref]$ownerId)
-  @{ name = $handle.ToInt64().ToString(); bundleId = $ownerId.ToString() } | ConvertTo-Json -Compress
+  $result = @{ name = $handle.ToInt64().ToString(); bundleId = $ownerId.ToString() }
 } elseif ($request.action -eq 'paste') {
   $handle = [IntPtr]([long]$request.handle)
   [uint32]$ownerId = 0
@@ -147,26 +154,110 @@ if ($request.action -eq 'foreground') {
   for ($i=0; $i -lt 20 -and [SonicribeDesktop]::GetForegroundWindow() -ne $handle; $i++) { Start-Sleep -Milliseconds 25 }
   if ([SonicribeDesktop]::GetForegroundWindow() -ne $handle) { throw 'PASTE_FOCUS_DENIED' }
   if (-not [SonicribeDesktop]::PasteText($handle, [uint32]$request.ownerId, [string]$request.text)) { throw 'PASTE_INPUT_DENIED' }
-  @{ success = $true } | ConvertTo-Json -Compress
+  $result = @{ success = $true }
 } else { throw 'INVALID_DESKTOP_OPERATION' }
+    $response = @{ id = $request.id; result = $result }
+  } catch {
+    $code = $_.Exception.Message
+    if ($code -notmatch '^[A-Z][A-Z_]{2,80}$') { $code = 'WINDOWS_DESKTOP_OPERATION_FAILED' }
+    $response = @{ id = $request.id; error = $code }
+  }
+  [Console]::Out.WriteLine(($response | ConvertTo-Json -Compress -Depth 4))
+  [Console]::Out.Flush()
+}
 `;
 
-function createWindowsDesktop({ execute = execFile, env = process.env } = {}) {
-  const executable = path.win32.join(env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  function operation(payload, signal) {
-    return new Promise((resolve, reject) => {
-      const child = execute(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
-        Buffer.from(WINDOWS_DESKTOP_SCRIPT, 'utf16le').toString('base64')], {
-        env: childProcessEnvironment({}, env), signal, windowsHide: true, timeout: 10000, maxBuffer: 65536
-      }, (error, stdout) => {
-        if (error) return reject(Object.assign(new Error('Windows could not confirm the paste target. Text remains in History.'), { code: 'WINDOWS_PASTE_UNCONFIRMED' }));
-        try { resolve(JSON.parse(stdout)); } catch (_) { reject(new Error('WINDOWS_DESKTOP_INVALID_RESPONSE')); }
-      });
-      child.stdin.on('error', reject);
-      child.stdin.end(JSON.stringify(payload));
-    });
+const FOREGROUND_TIMEOUT_MS = 500;
+const PASTE_TIMEOUT_MS = 3000;
+const STARTUP_TIMEOUT_MS = 10000;
+
+function createWindowsDesktop({ spawnProcess = spawn, env = process.env,
+  setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  const systemRoot = Object.entries(env).find(([key]) => key.toLowerCase() === 'systemroot')?.[1] || 'C:\\Windows';
+  const executable = path.win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  let current = null, nextId = 0, disposed = false;
+  const error = code => Object.assign(new Error(code), { code });
+  function fail(state, code) {
+    if (state.failed) return;
+    state.failed = true;
+    if (current === state) current = null;
+    clearTimer(state.startupTimer);
+    state.rejectReady(error(code));
+    for (const entry of state.pending.values()) {
+      clearTimer(entry.timer); entry.unsubscribe?.(); entry.reject(error(code));
+    }
+    state.pending.clear();
+    try { state.child.kill(); } catch (_) { /* Already exited. */ }
   }
+  function ensureStarted() {
+    if (disposed) throw error('WINDOWS_DESKTOP_DISPOSED');
+    if (current) return current;
+    const child = spawnProcess(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(WINDOWS_DESKTOP_SCRIPT, 'utf16le').toString('base64')], {
+      env: childProcessEnvironment({}, env, 'win32'), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe']
+    });
+    const state = { child, pending: new Map(), buffer: '', failed: false };
+    state.ready = new Promise((resolve, reject) => { state.resolveReady = resolve; state.rejectReady = reject; });
+    current = state;
+    state.startupTimer = setTimer(() => fail(state, 'WINDOWS_DESKTOP_STARTUP_TIMEOUT'), STARTUP_TIMEOUT_MS);
+    child.on('error', () => fail(state, 'WINDOWS_DESKTOP_PROCESS_ERROR'));
+    child.on('exit', () => fail(state, 'WINDOWS_DESKTOP_EXIT'));
+    child.on('close', () => fail(state, 'WINDOWS_DESKTOP_EXIT'));
+    child.stdin.on('error', () => fail(state, 'WINDOWS_DESKTOP_STDIN_ERROR'));
+    // Drain PowerShell diagnostics without retaining or logging private content.
+    child.stderr.on('data', () => {});
+    child.stdout.on('data', chunk => {
+      if (state.failed) return;
+      state.buffer += chunk.toString('utf8');
+      if (state.buffer.length > 65536) { fail(state, 'WINDOWS_DESKTOP_INVALID_RESPONSE'); return; }
+      let end;
+      while ((end = state.buffer.indexOf('\n')) !== -1) {
+        const line = state.buffer.slice(0, end).trim(); state.buffer = state.buffer.slice(end + 1);
+        if (!line) continue;
+        let response;
+        try { response = JSON.parse(line); } catch (_) { fail(state, 'WINDOWS_DESKTOP_INVALID_RESPONSE'); return; }
+        if (response.ready === true && !state.isReady) {
+          state.isReady = true; clearTimer(state.startupTimer); state.resolveReady(); continue;
+        }
+        const entry = state.pending.get(response.id);
+        if (!entry) continue; // A stale/unknown ID never resolves another request.
+        state.pending.delete(response.id); clearTimer(entry.timer); entry.unsubscribe?.();
+        if (response.error) entry.reject(error(/^[A-Z_]{3,81}$/.test(response.error) ? response.error : 'WINDOWS_DESKTOP_OPERATION_FAILED'));
+        else if (!response.result || typeof response.result !== 'object') {
+          entry.reject(error('WINDOWS_DESKTOP_INVALID_RESPONSE')); fail(state, 'WINDOWS_DESKTOP_INVALID_RESPONSE');
+        } else entry.resolve(response.result);
+      }
+    });
+    return state;
+  }
+  async function warmup() { const state = ensureStarted(); await state.ready; }
+  async function operation(payload, signal) {
+    if (signal?.aborted) throw error('WINDOWS_DESKTOP_ABORTED');
+    const state = ensureStarted();
+    // The request deadline includes cold compilation. Prewarming has a separate
+    // startup bound, and recording never awaits it. A paste is never replayed.
+    const timer = setTimer(() => fail(state, 'WINDOWS_DESKTOP_REQUEST_TIMEOUT'),
+      payload.action === 'foreground' ? FOREGROUND_TIMEOUT_MS : PASTE_TIMEOUT_MS);
+    const abort = () => fail(state, 'WINDOWS_DESKTOP_ABORTED');
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      await state.ready;
+      if (state.failed || current !== state) throw error('WINDOWS_DESKTOP_EXIT');
+      if (signal?.aborted) { fail(state, 'WINDOWS_DESKTOP_ABORTED'); throw error('WINDOWS_DESKTOP_ABORTED'); }
+      return await new Promise((resolve, reject) => {
+        const id = ++nextId;
+        state.pending.set(id, { resolve, reject, timer, unsubscribe: () => signal?.removeEventListener('abort', abort) });
+        try { state.child.stdin.write(JSON.stringify({ ...payload, id }) + '\n'); }
+        catch (_) { fail(state, 'WINDOWS_DESKTOP_STDIN_ERROR'); }
+      });
+    } finally {
+      clearTimer(timer); signal?.removeEventListener('abort', abort);
+    }
+  }
+
   return Object.freeze({
+    warmup,
+    dispose() { disposed = true; if (current) fail(current, 'WINDOWS_DESKTOP_DISPOSED'); },
     foreground: () => operation({ action: 'foreground' }),
     paste: (handle, ownerId, text, { signal } = {}) => {
       if (!/^[1-9]\d{0,18}$/.test(String(handle)) || !/^[1-9]\d{0,9}$/.test(String(ownerId))) return Promise.reject(new Error('PASTE_TARGET_UNAVAILABLE'));

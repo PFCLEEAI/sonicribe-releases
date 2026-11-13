@@ -39,12 +39,12 @@ jobs:
           & $exe --sonicribe-quit; Start-Sleep 6
           $r.processesAfterQuit = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count
           $r | ConvertTo-Json | Tee-Object out\relaunch.json
-      - name: Helper diagnostics
+      - name: Desktop helper check (persistent helper, Korean paste into Notepad, clipboard restore)
         if: always()
-        run: node ci\diag.js > out\diag.json; type out\diag.json
-      - name: Desktop helper timing + Korean paste into Notepad
-        if: always()
-        run: node ci\helper-test.js > out\helper-test.json; type out\helper-test.json
+        shell: pwsh
+        run: |
+          node ci\scripts\test\windows-ci-helper-check.js | Tee-Object out\helper-check.json
+          exit $LASTEXITCODE
       - name: Uninstall
         if: always()
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -Uninstall -OutputDir out\uninstall
