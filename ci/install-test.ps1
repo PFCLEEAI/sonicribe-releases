@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 Installs and smoke-tests the unsigned Sonicribe Cloud Windows x64 package.
@@ -16,18 +16,20 @@ Uninstall preserves the owner's app profile; it never removes user data itself.
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Install')][string]$InstallerPath,
     [Parameter(Mandatory = $true, ParameterSetName = 'Uninstall')][switch]$Uninstall,
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\sonicribe-cloud'),
+    [string]$PackageName = 'sonicribe-cloud',
+    [string]$ProductName = 'Sonicribe Cloud',
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA ('Programs\' + $PackageName)),
     [string]$OutputDir = (Join-Path (Get-Location) ('sonicribe-windows-test-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))),
     [ValidateRange(5, 120)][int]$WaitSeconds = 12
 )
 $ErrorActionPreference = 'Stop'
 $started = [DateTimeOffset]::UtcNow
-$exe = Join-Path $InstallDir 'sonicribe-cloud.exe'
-$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Sonicribe Cloud.lnk'
-$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Sonicribe Cloud.lnk'
+$exe = Join-Path $InstallDir ($PackageName + '.exe')
+$startMenu = Join-Path $env:APPDATA ('Microsoft\Windows\Start Menu\Programs\' + $ProductName + '.lnk')
+$desktop = Join-Path ([Environment]::GetFolderPath('Desktop')) ($ProductName + '.lnk')
 $protocolKey = 'HKCU:\Software\Classes\sonicribe-cloud'
 $expectedCommand = '"' + $exe + '" "%1"'
-$runtimeLog = Join-Path $env:APPDATA 'Sonicribe Cloud\logs\windows-runtime.jsonl'
+$runtimeLog = Join-Path $env:APPDATA ($ProductName + '\logs\windows-runtime.jsonl')
 $ownedProcess = $null
 $summary = [ordered]@{
     mode = $(if ($Uninstall) { 'uninstall' } else { 'install-smoke-test' })
@@ -38,7 +40,7 @@ $summary = [ordered]@{
     manualChecksRequired = @('browser sign-in and app callback', 'Shift+Z start/stop and microphone', 'focused app Ctrl+V and clipboard restoration', 'History', 'Settings', 'tray Quit', 'update install')
 }
 function Get-OwnedAppProcesses {
-    @(Get-Process -Name 'sonicribe-cloud' -ErrorAction SilentlyContinue | Where-Object {
+    @(Get-Process -Name $PackageName -ErrorAction SilentlyContinue | Where-Object {
         try { [string]::Equals($_.Path, $exe, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
     })
 }
@@ -65,7 +67,7 @@ try {
     if ($Uninstall) {
         Assert-Check 'executableBeforeUninstall' (Test-Path -LiteralPath $exe)
         Assert-Check 'cleanQuitBeforeUninstall' (Invoke-CleanQuit)
-        $uninstaller = Join-Path $InstallDir 'Uninstall sonicribe-cloud.exe'
+        $uninstaller = Join-Path $InstallDir ('Uninstall ' + $PackageName + '.exe')
         Assert-Check 'uninstallerExists' (Test-Path -LiteralPath $uninstaller)
         $remove = Start-Process -FilePath $uninstaller -ArgumentList '/S' -PassThru
         Assert-Check 'uninstallerFinished' ($remove.WaitForExit(120000))

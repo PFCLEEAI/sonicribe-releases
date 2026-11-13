@@ -37,6 +37,7 @@ public static class SonicribeDesktop {
   [DllImport("user32.dll")] public static extern IntPtr GetClipboardData(uint f);
   [DllImport("user32.dll")] public static extern IntPtr SetClipboardData(uint f, IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+  [DllImport("user32.dll")] public static extern IntPtr GetClipboardOwner();
   [DllImport("kernel32.dll")] public static extern UIntPtr GlobalSize(IntPtr h);
   [DllImport("kernel32.dll")] public static extern IntPtr GlobalLock(IntPtr h);
   [DllImport("kernel32.dll")] public static extern bool GlobalUnlock(IntPtr h);
@@ -65,6 +66,21 @@ public static class SonicribeDesktop {
     else if(entry.kind==14) DeleteEnhMetaFile(entry.native);
     else GlobalFree(entry.native);
     entry.native=IntPtr.Zero;
+  }
+  static bool ClipboardStillOurs(IntPtr owner, string text) {
+    // Called only with the clipboard locked. Synthesized text formats can change
+    // its sequence without a copy. A real copy (even identical text) changes owner.
+    if(GetClipboardOwner()!=owner) return false;
+    uint format=0;
+    while((format=EnumClipboardFormats(format))!=0) {
+      if(format!=1 && format!=7 && format!=13 && format!=16) return false;
+    }
+    IntPtr data=GetClipboardData(13);
+    if(data==IntPtr.Zero || GlobalSize(data).ToUInt64()<(ulong)(text.Length+1)*2) return false;
+    IntPtr address=GlobalLock(data);
+    if(address==IntPtr.Zero) return false;
+    try { return Marshal.PtrToStringUni(address,text.Length+1)==text+"\0"; }
+    finally { GlobalUnlock(data); }
   }
   public static bool PasteText(IntPtr target, uint targetOwner, string text) {
     // A hidden native owner window lets EmptyClipboard/SetClipboardData work without
@@ -109,8 +125,10 @@ public static class SonicribeDesktop {
         if(inserted!=0) {
           Open(owner);
           try {
-            // An intervening user/app copy owns the clipboard. Never overwrite it.
-            if(GetClipboardSequenceNumber()==inserted) {
+            // Keep the strict sequence fast path; accept only our unchanged text
+            // and owner if Windows merely materialized CF_TEXT/OEMTEXT/LOCALE.
+            // Any new copy or extra rich/custom format must remain untouched.
+            if(GetClipboardSequenceNumber()==inserted || ClipboardStillOurs(owner,text)) {
               foreach(var entry in saved) if(entry.data!=null) entry.native=Allocate(entry.data);
               if(!EmptyClipboard()) throw new Exception("CLIPBOARD_RESTORE_FAILED");
               foreach(var entry in saved) {
@@ -270,7 +288,8 @@ function createWindowsDesktop({ spawnProcess = spawn, env = process.env,
 async function pasteWindowsText({ text, handle, ownerId, desktop, assertCurrent = () => {}, captureAccount }) {
   assertCurrent();
   // The native operation snapshots every raw HGLOBAL format plus bitmap/EMF handles,
-  // sends Ctrl+V once, and restores only if its clipboard sequence still matches.
+  // sends Ctrl+V once, and restores only if its sequence matches or its native
+  // owner and exact Unicode text still match with no new non-text formats.
   const account = captureAccount?.(), controller = new AbortController();
   const unsubscribe = account?.onInvalidated(() => controller.abort());
   try {

@@ -10,6 +10,9 @@ jobs:
   install:
     runs-on: windows-latest
     timeout-minutes: 30
+    env:
+      WINDOWS_PACKAGE_NAME: sonicribe-cloud-update-test
+      WINDOWS_PRODUCT_NAME: Sonicribe Cloud Update Test
     steps:
       - uses: actions/checkout@v4
       - name: Download draft installer
@@ -17,31 +20,50 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           New-Item -ItemType Directory -Force installer, out | Out-Null
-          $id = gh api "repos/${{ github.repository }}/releases" --jq '.[] | select(.draft and .name == "win-test-2.5.22") | .assets[] | select(.name == "sonicribe-cloud-2.5.22-win-x64.exe") | .id'
-          if (-not $id) { throw "draft asset not found" }
-          curl.exe -sSL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" -o installer\sonicribe-cloud-2.5.22-win-x64.exe "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id"
-          (Get-FileHash installer\sonicribe-cloud-2.5.22-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Tee-Object out\installer-sha256.txt
+          $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
+          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.toVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid test release config' }
+          $release = gh release view $config.tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $config.tag) { throw 'draft required' }
+          $installerName = "sonicribe-cloud-$($config.toVersion)-win-x64.exe"
+          if (@($release.assets | Where-Object { $_.name -ceq $installerName }).Count -ne 1) { throw 'draft installer asset not found' }
+          gh release download $config.tag --repo $env:GITHUB_REPOSITORY --dir installer --pattern $installerName
+          if ($LASTEXITCODE -ne 0) { throw 'download failed' }
+          $installerPath = Join-Path (Resolve-Path installer).Path $installerName
+          "WINDOWS_TEST_INSTALLER=$installerPath" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          [ordered]@{ tag = $config.tag; version = $config.toVersion; installer = $installerName } | ConvertTo-Json | Tee-Object out\release.json
+          (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLower() | Tee-Object out\installer-sha256.txt
           Get-ComputerInfo -Property OsName,OsVersion,OsArchitecture | ConvertTo-Json | Out-File out\os.json
       - name: Install, launch, screenshot, quit
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -InstallerPath installer\sonicribe-cloud-2.5.22-win-x64.exe -OutputDir out\install -WaitSeconds 20
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -InstallerPath $env:WINDOWS_TEST_INSTALLER -PackageName $env:WINDOWS_PACKAGE_NAME -ProductName $env:WINDOWS_PRODUCT_NAME -OutputDir out\install -WaitSeconds 20
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
+          $asar = Join-Path $env:LOCALAPPDATA "Programs\$env:WINDOWS_PACKAGE_NAME\resources\app.asar"
+          node ci/windows-update-version.js $asar $config.toVersion | Tee-Object out\install\installed-version.json
+          exit $LASTEXITCODE
       - name: Relaunch (second start after install)
         if: always()
         shell: pwsh
         run: |
-          $exe = Join-Path $env:LOCALAPPDATA 'Programs\sonicribe-cloud\sonicribe-cloud.exe'
+          $exe = Join-Path $env:LOCALAPPDATA "Programs\$env:WINDOWS_PACKAGE_NAME\$env:WINDOWS_PACKAGE_NAME.exe"
           $t = [Diagnostics.Stopwatch]::StartNew(); $p = Start-Process $exe -PassThru
           $deadline = (Get-Date).AddSeconds(30); $win = $null
-          while ((Get-Date) -lt $deadline -and -not $win) { Start-Sleep -Milliseconds 250; $win = Get-Process sonicribe-cloud -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
-          $r = [ordered]@{ windowSeenMs = $(if ($win) { $t.ElapsedMilliseconds } else { $null }); processes = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count; title = $win.MainWindowTitle }
+          while ((Get-Date) -lt $deadline -and -not $win) { Start-Sleep -Milliseconds 250; $win = Get-Process $env:WINDOWS_PACKAGE_NAME -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
+          $r = [ordered]@{ windowSeenMs = $(if ($win) { $t.ElapsedMilliseconds } else { $null }); processes = @(Get-Process $env:WINDOWS_PACKAGE_NAME -ErrorAction SilentlyContinue).Count; title = $win.MainWindowTitle }
           Start-Sleep 5
           $r.aliveAfter5s = [bool](Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
-          $r.workingSetMB = [math]::Round(((Get-Process sonicribe-cloud -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum)/1MB,1)
+          $r.workingSetMB = [math]::Round(((Get-Process $env:WINDOWS_PACKAGE_NAME -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum)/1MB,1)
           & $exe --sonicribe-quit; Start-Sleep 6
-          $r.processesAfterQuit = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count
+          $r.processesAfterQuit = @(Get-Process $env:WINDOWS_PACKAGE_NAME -ErrorAction SilentlyContinue).Count
           $r | ConvertTo-Json | Tee-Object out\relaunch.json
+          if (-not $win -or -not $r.aliveAfter5s -or $r.processesAfterQuit -ne 0) { throw 'relaunch or clean quit failed' }
       - name: Sign-in handoff check (close to tray, protocol callback reaches running app)
         if: always()
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\signin-check.ps1 | Tee-Object out\signin-check.txt
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\signin-check.ps1 -PackageName $env:WINDOWS_PACKAGE_NAME -ProductName $env:WINDOWS_PRODUCT_NAME | Tee-Object out\signin-check.txt
+          exit $LASTEXITCODE
       - name: Desktop helper check (persistent helper, Korean paste into Notepad, clipboard restore)
         if: always()
         shell: pwsh
@@ -50,12 +72,15 @@ jobs:
           exit $LASTEXITCODE
       - name: Uninstall
         if: always()
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -Uninstall -OutputDir out\uninstall
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -Uninstall -PackageName $env:WINDOWS_PACKAGE_NAME -ProductName $env:WINDOWS_PRODUCT_NAME -OutputDir out\uninstall
+          exit $LASTEXITCODE
       - name: Collect app logs
         if: always()
         shell: pwsh
         run: |
-          Copy-Item -Recurse -ErrorAction SilentlyContinue "$env:APPDATA\Sonicribe Cloud\logs" out\app-logs
+          Copy-Item -Recurse -ErrorAction SilentlyContinue "$env:APPDATA\$env:WINDOWS_PRODUCT_NAME\logs" out\app-logs
           Get-ChildItem -Recurse out | Select-Object FullName, Length | Format-Table -AutoSize
       - uses: actions/upload-artifact@v4
         if: always()
@@ -72,18 +97,20 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force update-feed, out/update | Out-Null
           $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
-          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$') { throw 'invalid test tag' }
+          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.fromVersion -notmatch '^\d+\.\d+\.\d+$' -or $config.toVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid test release config' }
           $release = gh release view $config.tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,assets | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $config.tag) { throw 'draft required' }
-          gh release download $config.tag --repo $env:GITHUB_REPOSITORY --dir update-feed --pattern 'sonicribe-cloud-2.5.9*-win-x64.exe*' --pattern latest.yml
+          $fromInstaller = "sonicribe-cloud-$($config.fromVersion)-win-x64.exe"
+          $toInstaller = "sonicribe-cloud-$($config.toVersion)-win-x64.exe"
+          gh release download $config.tag --repo $env:GITHUB_REPOSITORY --dir update-feed --pattern $fromInstaller --pattern "$fromInstaller.blockmap" --pattern $toInstaller --pattern "$toInstaller.blockmap" --pattern latest.yml
           if ($LASTEXITCODE -ne 0) { throw 'download failed' }
           Get-ChildItem update-feed | ForEach-Object { [ordered]@{ file = $_.Name; size = $_.Length; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() } } | ConvertTo-Json | Out-File out/update/downloads.json
           Get-ComputerInfo -Property OsName,OsVersion,OsArchitecture | ConvertTo-Json | Out-File out/update/os.json
-      - name: Auto-download, normal restart, verify 2.5.91 and launch
+      - name: Auto-download, normal restart, verify target version and launch
         shell: pwsh
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci/windows-update-check.ps1 -FeedDir update-feed -OutputDir out/update | Tee-Object out/update/check.log
           exit $LASTEXITCODE
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: windows-update-2.5.90-to-2.5.91, path: out/update, retention-days: 14 }
+        with: { name: windows-update-test, path: out/update, retention-days: 14 }

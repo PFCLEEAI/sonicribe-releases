@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
 Checks an INSTALLED Sonicribe Cloud in an unlocked Windows CI desktop, without Google.
@@ -12,11 +12,13 @@ JSON goes to stdout; exit 0 requires all checks and normal quit to pass.
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\sonicribe-cloud'),
-    [string]$RuntimeLog = (Join-Path $env:APPDATA 'Sonicribe Cloud\logs\windows-runtime.jsonl')
+    [string]$PackageName = 'sonicribe-cloud',
+    [string]$ProductName = 'Sonicribe Cloud',
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA ('Programs\' + $PackageName)),
+    [string]$RuntimeLog = (Join-Path $env:APPDATA ($ProductName + '\logs\windows-runtime.jsonl'))
 )
 $ErrorActionPreference = 'Stop'
-$exe = Join-Path $InstallDir 'sonicribe-cloud.exe'
+$exe = Join-Path $InstallDir ($PackageName + '.exe')
 $started = [DateTimeOffset]::UtcNow
 $original = $null
 $quitRequested = $false
@@ -30,7 +32,7 @@ function Assert-Check([string]$Name, [bool]$Value) {
     if (-not $Value) { throw 'CHECK_FAILED' }
 }
 function Get-AppProcesses {
-    @(Get-CimInstance Win32_Process -Filter "Name = 'sonicribe-cloud.exe'" | Where-Object {
+    @(Get-CimInstance Win32_Process -Filter "Name = '$PackageName.exe'" | Where-Object {
         [string]::Equals($_.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)
     })
 }
