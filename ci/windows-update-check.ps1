@@ -72,7 +72,7 @@ try {
   $launched = Start-Process $exe -PassThru
   Assert-Check 'updatedAppLaunches' (Wait-Until { @(Get-Process sonicribe-cloud-update-test -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count -gt 0 } 30)
   Write-Output 'UPDATE_PROOF launched=2.5.91'
-  $registry = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Sonicribe Cloud Update Test' })
+  $registry = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'Sonicribe Cloud Update Test 2.5.91' })
   $summary.displayVersion = @($registry.DisplayVersion)
   Assert-Check 'registryVersion91' (@($registry | Where-Object { $_.DisplayVersion -eq '2.5.91' }).Count -gt 0)
   $summary.passed = $true
