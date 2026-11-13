@@ -1,0 +1,56 @@
+name: windows-install-test
+# Test-only branch: installs the draft Sonicribe Windows build on a clean runner.
+on:
+  push:
+    branches: [ci/windows-install-test]
+permissions:
+  contents: write # read draft release assets
+concurrency: { group: windows-install-test, cancel-in-progress: true }
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download draft installer
+        shell: pwsh
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          New-Item -ItemType Directory -Force installer, out | Out-Null
+          $id = gh api "repos/${{ github.repository }}/releases" --jq '.[] | select(.draft and .name == "win-test-2.5.22") | .assets[] | select(.name == "sonicribe-cloud-2.5.22-win-x64.exe") | .id'
+          if (-not $id) { throw "draft asset not found" }
+          curl.exe -sSL -H "Authorization: Bearer $env:GH_TOKEN" -H "Accept: application/octet-stream" -o installer\sonicribe-cloud-2.5.22-win-x64.exe "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id"
+          (Get-FileHash installer\sonicribe-cloud-2.5.22-win-x64.exe -Algorithm SHA256).Hash.ToLower() | Tee-Object out\installer-sha256.txt
+          Get-ComputerInfo -Property OsName,OsVersion,OsArchitecture | ConvertTo-Json | Out-File out\os.json
+      - name: Install, launch, screenshot, quit
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -InstallerPath installer\sonicribe-cloud-2.5.22-win-x64.exe -OutputDir out\install -WaitSeconds 20
+      - name: Relaunch (second start after install)
+        if: always()
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\sonicribe-cloud\sonicribe-cloud.exe'
+          $t = [Diagnostics.Stopwatch]::StartNew(); $p = Start-Process $exe -PassThru
+          $deadline = (Get-Date).AddSeconds(30); $win = $null
+          while ((Get-Date) -lt $deadline -and -not $win) { Start-Sleep -Milliseconds 250; $win = Get-Process sonicribe-cloud -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }
+          $r = [ordered]@{ windowSeenMs = $(if ($win) { $t.ElapsedMilliseconds } else { $null }); processes = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count; title = $win.MainWindowTitle }
+          Start-Sleep 5
+          $r.aliveAfter5s = [bool](Get-Process -Id $p.Id -ErrorAction SilentlyContinue)
+          $r.workingSetMB = [math]::Round(((Get-Process sonicribe-cloud -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum)/1MB,1)
+          & $exe --sonicribe-quit; Start-Sleep 6
+          $r.processesAfterQuit = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count
+          $r | ConvertTo-Json | Tee-Object out\relaunch.json
+      - name: Desktop helper timing + Korean paste into Notepad
+        if: always()
+        run: node ci\helper-test.js > out\helper-test.json; type out\helper-test.json
+      - name: Uninstall
+        if: always()
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\install-test.ps1 -Uninstall -OutputDir out\uninstall
+      - name: Collect app logs
+        if: always()
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse -ErrorAction SilentlyContinue "$env:APPDATA\Sonicribe Cloud\logs" out\app-logs
+          Get-ChildItem -Recurse out | Select-Object FullName, Length | Format-Table -AutoSize
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: windows-install-test, path: out, retention-days: 14 }
