@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 [CmdletBinding()]
 param([string]$FeedDir = 'update-feed', [string]$OutputDir = 'out/update')
 $ErrorActionPreference = 'Stop'
