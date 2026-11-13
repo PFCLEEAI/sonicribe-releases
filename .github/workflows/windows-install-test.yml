@@ -39,6 +39,9 @@ jobs:
           & $exe --sonicribe-quit; Start-Sleep 6
           $r.processesAfterQuit = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count
           $r | ConvertTo-Json | Tee-Object out\relaunch.json
+      - name: Sign-in handoff check (close to tray, protocol callback reaches running app)
+        if: always()
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci\signin-check.ps1 | Tee-Object out\signin-check.txt
       - name: Desktop helper check (persistent helper, Korean paste into Notepad, clipboard restore)
         if: always()
         shell: pwsh
