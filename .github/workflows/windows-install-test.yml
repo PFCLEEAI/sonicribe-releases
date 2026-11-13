@@ -39,6 +39,9 @@ jobs:
           & $exe --sonicribe-quit; Start-Sleep 6
           $r.processesAfterQuit = @(Get-Process sonicribe-cloud -ErrorAction SilentlyContinue).Count
           $r | ConvertTo-Json | Tee-Object out\relaunch.json
+      - name: Helper diagnostics
+        if: always()
+        run: node ci\diag.js > out\diag.json; type out\diag.json
       - name: Desktop helper timing + Korean paste into Notepad
         if: always()
         run: node ci\helper-test.js > out\helper-test.json; type out\helper-test.json
