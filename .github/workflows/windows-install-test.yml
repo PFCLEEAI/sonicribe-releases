@@ -60,3 +60,30 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: windows-install-test, path: out, retention-days: 14 }
+
+  update:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download isolated update installers from authorized draft
+        shell: pwsh
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          New-Item -ItemType Directory -Force update-feed, out/update | Out-Null
+          $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
+          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$') { throw 'invalid test tag' }
+          $release = gh release view $config.tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $config.tag) { throw 'draft required' }
+          gh release download $config.tag --repo $env:GITHUB_REPOSITORY --dir update-feed --pattern 'sonicribe-cloud-2.5.9*-win-x64.exe*' --pattern latest.yml
+          if ($LASTEXITCODE -ne 0) { throw 'download failed' }
+          Get-ChildItem update-feed | ForEach-Object { [ordered]@{ file = $_.Name; size = $_.Length; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() } } | ConvertTo-Json | Out-File out/update/downloads.json
+          Get-ComputerInfo -Property OsName,OsVersion,OsArchitecture | ConvertTo-Json | Out-File out/update/os.json
+      - name: Auto-download, normal restart, verify 2.5.91 and launch
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File ci/windows-update-check.ps1 -FeedDir update-feed -OutputDir out/update | Tee-Object out/update/check.log
+          exit $LASTEXITCODE
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: windows-update-2.5.90-to-2.5.91, path: out/update, retention-days: 14 }
