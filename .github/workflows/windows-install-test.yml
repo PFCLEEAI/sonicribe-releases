@@ -21,7 +21,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force installer, out | Out-Null
           $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
-          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.toVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid test release config' }
+          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.toVersion -cne '0.0.91') { throw 'invalid test release config' }
           $release = gh release view $config.tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,assets | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $config.tag) { throw 'draft required' }
           $installerName = "sonicribe-cloud-$($config.toVersion)-win-x64.exe"
@@ -97,7 +97,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force update-feed, out/update | Out-Null
           $config = Get-Content ci/windows-update-release.json | ConvertFrom-Json
-          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.fromVersion -notmatch '^\d+\.\d+\.\d+$' -or $config.toVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'invalid test release config' }
+          if ($config.tag -notmatch '^win-test-update-[0-9a-f]+$' -or $config.fromVersion -cne '0.0.90' -or $config.toVersion -cne '0.0.91') { throw 'invalid test release config' }
           $release = gh release view $config.tag --repo $env:GITHUB_REPOSITORY --json tagName,isDraft,assets | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $config.tag) { throw 'draft required' }
           $fromInstaller = "sonicribe-cloud-$($config.fromVersion)-win-x64.exe"
