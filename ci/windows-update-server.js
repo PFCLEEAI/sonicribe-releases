@@ -4,7 +4,7 @@ const http = require('node:http'), fs = require('node:fs'), path = require('node
 function serve(directory, port = 18765) {
   return http.createServer((req, res) => {
     const name = new URL(req.url, 'http://127.0.0.1').pathname.slice(1);
-    if (!/^(?:latest\.yml|sonicribe-cloud-2\.5\.9[01]-win-x64\.exe(?:\.blockmap)?)$/.test(name)) { res.writeHead(404).end(); return; }
+    if (!/^(?:latest\.yml|sonicribe-cloud-0\.0\.9[01]-win-x64\.exe(?:\.blockmap)?)$/.test(name)) { res.writeHead(404).end(); return; }
     const file = path.join(directory, name);
     if (!fs.existsSync(file)) { res.writeHead(404).end(); return; }
     const size = fs.statSync(file).size;
